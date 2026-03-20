@@ -88,8 +88,6 @@ export interface Response {
   content?: Record<string, MediaType>;
 }
 
-export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
-
 // ============================================================================
 // Error codes for classification
 // ============================================================================
@@ -99,7 +97,6 @@ export enum ErrorCode {
   E_UNSUPPORTED_CLIENT = 'E_UNSUPPORTED_CLIENT',
   E_OPERATION_BUILD_FAILED = 'E_OPERATION_BUILD_FAILED',
   E_SNIPPET_GENERATION_FAILED = 'E_SNIPPET_GENERATION_FAILED',
-  E_OUTPUT_WRITE_FAILED = 'E_OUTPUT_WRITE_FAILED',
 }
 
 // Descriptor for an operation extracted from OpenAPI spec
@@ -139,12 +136,11 @@ export interface ParameterInfo {
 // Generation configuration from CLI
 export interface GenerationConfig {
   input: string;
-  output: string;
   languages: LanguageConfig[];
   filters: OperationFilters;
   auth: AuthConfig;
   server: ServerConfig;
-  options: GenerationOptions;
+  includeOptional: boolean;
 }
 
 // Parsed language with optional client
@@ -167,26 +163,12 @@ export interface AuthConfig {
   apiKey?: string;
   bearerToken?: string;
   basicAuth?: { username: string; password: string };
-  selectedScheme?: string;
 }
 
 // Server configuration
 export interface ServerConfig {
   index: number;
   variables: Record<string, string>;
-}
-
-// Generation options
-export interface GenerationOptions {
-  concurrency: number;
-  strict: boolean;
-  failOnPartial: boolean;
-  includeOptional: boolean;
-  dryRun: boolean;
-  outputFormat: 'json' | 'markdown';
-  generateFiles: boolean;
-  updateSpec: boolean;
-  onProgress?: (current: number, total: number, message: string) => void;
 }
 
 // Result of snippet generation for one operation+language
@@ -216,54 +198,4 @@ export interface OperationResult {
   successCount: number;
   failureCount: number;
   skipCount: number;
-}
-
-// Summary totals
-export interface GenerationTotals {
-  operationsTotal: number;
-  operationsProcessed: number;
-  snippetsSuccess: number;
-  snippetsFailed: number;
-  snippetsSkipped: number;
-}
-
-// Unresolved issues
-export interface UnresolvedIssue {
-  operationId: string;
-  code: ErrorCode;
-  message: string;
-}
-
-// Complete manifest output
-export interface GenerationManifest {
-  metadata: ManifestMetadata;
-  totals: GenerationTotals;
-  operations: OperationResult[];
-  unresolvedIssues: UnresolvedIssue[];
-}
-
-// Manifest metadata
-export interface ManifestMetadata {
-  input: string;
-  output: string;
-  languages: string[];
-  generatedAt: string;
-  durationMs: number;
-  specInfo?: {
-    title: string;
-    version: string;
-    openapi: string;
-  };
-}
-
-// Supported languages and clients (from HTTPSnippet)
-export interface SupportedTarget {
-  key: string;
-  title: string;
-  clients: SupportedClient[];
-}
-
-export interface SupportedClient {
-  key: string;
-  title: string;
 }

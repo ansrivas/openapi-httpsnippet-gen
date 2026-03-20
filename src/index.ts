@@ -7,19 +7,15 @@ import OAS from 'oas';
 import oasToHar from '@readme/oas-to-har';
 import oasToSnippet from '@readme/oas-to-snippet';
 import { HTTPSnippet } from '@readme/httpsnippet';
-import { mkdir, readFile, writeFile, access, constants } from 'fs/promises';
-import { dirname, join, extname } from 'path';
+import { readFile, writeFile } from 'fs/promises';
+import { extname } from 'path';
 import yaml from 'js-yaml';
 import {
   GenerationConfig,
-  GenerationManifest,
-  GenerationTotals,
-  ManifestMetadata,
   OperationDescriptor,
   OperationFilters,
   OperationResult,
   SnippetResult,
-  UnresolvedIssue,
   ErrorCode,
   ParameterInfo,
   RequestBodyInfo,
@@ -61,25 +57,19 @@ const LANGUAGE_METADATA: Readonly<Record<string, LanguageMeta>> = Object.freeze(
 });
 
 /**
- * Main generation function
+ * Main function: parses spec, generates snippets, injects x-codeSamples
  */
-export async function generate(config: GenerationConfig): Promise<GenerationManifest> {
+export async function generate(config: GenerationConfig): Promise<void> {
   const startTime = Date.now();
-  const issues: UnresolvedIssue[] = [];
-  const operationResults: OperationResult[] = [];
 
   try {
-    // Parse and validate OpenAPI spec
     console.log(`Parsing OpenAPI spec: ${config.input}`);
 
     const normalizer = new OASNormalize(config.input, { enablePaths: true });
     const dereferencedSpec = await normalizer.dereference();
-    // Cast to our OpenAPISpec type (oas-normalize returns Document type)
     const spec = dereferencedSpec as unknown as OpenAPISpec;
-    // Create OAS instance for library compatibility
     const oasInstance = new OAS(dereferencedSpec as any) as any;
 
-    // Extract spec metadata
     const specInfo = {
       title: spec.info?.title || 'Untitled API',
       version: spec.info?.version || '0.0.0',
@@ -88,84 +78,41 @@ export async function generate(config: GenerationConfig): Promise<GenerationMani
 
     console.log(`Spec: ${specInfo?.title} (${specInfo?.openapi})`);
 
-    // Discover operations
     const operations = discoverOperations(spec, config.filters);
     console.log(`Found ${operations.length} operations`);
 
-    if (config.options.dryRun) {
-      console.log('\nDry run - listing operations:');
-      for (const op of operations) {
-        console.log(`  ${op.method.toUpperCase()} ${op.path} (${op.operationId})`);
+    // Process all operations
+    const operationResults: OperationResult[] = [];
+    const promises = operations.map((op) => processOperation(op, config, oasInstance, spec));
+    const settled = await Promise.allSettled(promises);
+
+    for (const result of settled) {
+      if (result.status === 'fulfilled') {
+        operationResults.push(result.value);
+      } else {
+        console.error(`Operation failed: ${result.reason}`);
       }
-      return createMinimalManifest(config, startTime, specInfo, operations.length);
     }
 
-    // Ensure output directory exists
-    await ensureDirectory(config.output);
+    // Inject x-codeSamples into spec
+    await updateSpecWithSnippets(config.input, operationResults);
 
-    // Process operations with concurrency limit
-    const chunks = chunkArray(operations, config.options.concurrency);
-    let processed = 0;
-
-    for (const chunk of chunks) {
-      // Report progress before processing each chunk
-      const currentOp = chunk[0];
-      config.options.onProgress?.(
-        processed,
-        operations.length,
-        `Processing ${currentOp.method} ${currentOp.path}`
-      );
-
-      const promises = chunk.map((op) => processOperation(op, config, oasInstance, spec, issues));
-      const settled = await Promise.allSettled(promises);
-
-      for (const result of settled) {
-        if (result.status === 'fulfilled') {
-          operationResults.push(result.value);
-        } else {
-          // Log error and add to issues
-          console.error(`Operation failed: ${result.reason}`);
-          issues.push({
-            operationId: 'UNKNOWN',
-            code: ErrorCode.E_OPERATION_BUILD_FAILED,
-            message: String(result.reason),
-          });
-        }
-      }
-
-      processed += chunk.length;
+    // Print summary
+    let snippetSuccess = 0;
+    let snippetFailed = 0;
+    let snippetSkipped = 0;
+    for (const o of operationResults) {
+      snippetSuccess += o.successCount;
+      snippetFailed += o.failureCount;
+      snippetSkipped += o.skipCount;
     }
-
-    // Final progress update
-    config.options.onProgress?.(operations.length, operations.length, 'Complete');
-
-    // Calculate totals
-    const totals = calculateTotals(operationResults);
-
-    // Create manifest
-    const manifest: GenerationManifest = {
-      metadata: createMetadata(config, startTime, specInfo),
-      totals,
-      operations: operationResults,
-      unresolvedIssues: issues,
-    };
-
-    // Write manifest
-    const manifestPath = join(config.output, 'manifest.json');
-    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
-    console.log(`\nManifest written to: ${manifestPath}`);
-
-    // Generate output files if requested
-    if (config.options.generateFiles) {
-      await generateOutputFiles(operationResults, config);
-    }
-
-    // Update the OpenAPI spec with x-codeSamples if requested
-    if (config.options.updateSpec) {
-      await updateSpecWithSnippets(config.input, operationResults);
-    }
-
-    return manifest;
+    const duration = Date.now() - startTime;
+    console.log(`\n=== Done ===`);
+    console.log(`Operations: ${operationResults.length}/${operations.length}`);
+    console.log(
+      `Snippets: ${snippetSuccess} generated, ${snippetFailed} failed, ${snippetSkipped} skipped`
+    );
+    console.log(`Duration: ${duration}ms`);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     throw new Error(`Generation failed: ${errorMessage}`);
@@ -304,8 +251,7 @@ async function processOperation(
   op: OperationDescriptor,
   config: GenerationConfig,
   oas: OASInstance,
-  spec: OpenAPISpec,
-  issues: UnresolvedIssue[]
+  spec: OpenAPISpec
 ): Promise<OperationResult> {
   const operationKey = createOperationKey(op);
   const snippets: SnippetResult[] = [];
@@ -320,17 +266,6 @@ async function processOperation(
     )
   );
   snippets.push(...snippetResults);
-
-  // Collect issues from all results
-  for (const result of snippetResults) {
-    if (result.error) {
-      issues.push({
-        operationId: op.operationId,
-        code: result.error.code,
-        message: result.error.message,
-      });
-    }
-  }
 
   const successCount = snippets.filter((s) => !s.error && s.code).length;
   const failureCount = snippets.filter((s) => s.error).length;
@@ -382,7 +317,8 @@ function buildRequestValues(op: OperationDescriptor, config: GenerationConfig): 
   for (const param of op.parameters) {
     const paramName = param.name.replace(/[{}]/g, '');
     const schema = param.schema as Record<string, any> | undefined;
-    const value = param.example || param.default || generatePrimitiveExample(schema as Record<string, unknown>);
+    const value =
+      param.example || param.default || generatePrimitiveExample(schema as Record<string, unknown>);
 
     if (param.in === 'path') {
       values.path[paramName] = value;
@@ -396,7 +332,7 @@ function buildRequestValues(op: OperationDescriptor, config: GenerationConfig): 
   }
 
   // Handle required-only filter
-  if (!config.options.includeOptional) {
+  if (!config.includeOptional) {
     for (const param of op.parameters) {
       if (!param.required) {
         if (param.in === 'query') {
@@ -410,8 +346,7 @@ function buildRequestValues(op: OperationDescriptor, config: GenerationConfig): 
 
   // Add request body if present
   if (op.requestBodyInfo) {
-    values.body =
-      op.requestBodyInfo.example || extractExampleFromSchema(op.requestBodyInfo.schema);
+    values.body = op.requestBodyInfo.example || extractExampleFromSchema(op.requestBodyInfo.schema);
   }
 
   // Set server configuration
@@ -428,13 +363,13 @@ function buildRequestValues(op: OperationDescriptor, config: GenerationConfig): 
  */
 function extractExampleFromSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return undefined;
-  
+
   const s = schema as Record<string, unknown>;
-  
+
   // Priority: example > default > generate from structure
   if (s.example !== undefined) return s.example;
   if (s.default !== undefined) return s.default;
-  
+
   if (s.type === 'object' && s.properties) {
     const obj: Record<string, unknown> = {};
     for (const [key, propSchema] of Object.entries(s.properties as Record<string, unknown>)) {
@@ -442,11 +377,11 @@ function extractExampleFromSchema(schema: unknown): unknown {
     }
     return obj;
   }
-  
+
   if (s.type === 'array' && s.items) {
     return [extractExampleFromSchema(s.items)];
   }
-  
+
   // Generate primitive examples
   return generatePrimitiveExample(s);
 }
@@ -457,17 +392,23 @@ function extractExampleFromSchema(schema: unknown): unknown {
 function generatePrimitiveExample(schema: Record<string, unknown>): string {
   const { type, format } = schema;
   const enumValues = schema.enum as unknown[] | undefined;
-  
+
   switch (type) {
     case 'string':
       if (enumValues?.length) return String(enumValues[0]);
       switch (format) {
-        case 'uuid': return '00000000-0000-0000-0000-000000000000';
-        case 'date-time': return '2024-01-01T00:00:00Z';
-        case 'date': return '2024-01-01';
-        case 'email': return 'example@example.com';
-        case 'uri': return 'https://example.com';
-        default: return '<string>';
+        case 'uuid':
+          return '00000000-0000-0000-0000-000000000000';
+        case 'date-time':
+          return '2024-01-01T00:00:00Z';
+        case 'date':
+          return '2024-01-01';
+        case 'email':
+          return 'example@example.com';
+        case 'uri':
+          return 'https://example.com';
+        default:
+          return '<string>';
       }
     case 'integer':
     case 'number':
@@ -668,7 +609,11 @@ function buildUrlFromSpec(
   for (const param of op.parameters) {
     if (param.in === 'path') {
       const schema = param.schema as Record<string, any> | undefined;
-      const value = String(param.example || param.default || generatePrimitiveExample(schema as Record<string, unknown>));
+      const value = String(
+        param.example ||
+          param.default ||
+          generatePrimitiveExample(schema as Record<string, unknown>)
+      );
       path = path.replace(`{${param.name}}`, encodeURIComponent(value));
     }
   }
@@ -744,142 +689,6 @@ with urllib.request.urlopen(req) as response:
 // Authorization: Bearer <TOKEN>
 `;
   }
-}
-
-/**
- * Generate output files
- */
-async function generateOutputFiles(
-  operationResults: OperationResult[],
-  config: GenerationConfig
-): Promise<void> {
-  const snippetsDir = join(config.output, 'snippets');
-  await ensureDirectory(snippetsDir);
-
-  for (const opResult of operationResults) {
-    const opDir = join(snippetsDir, opResult.operationId);
-    await ensureDirectory(opDir);
-
-    // Write index.json
-    await writeFile(
-      join(opDir, 'index.json'),
-      JSON.stringify(
-        {
-          operationId: opResult.operationId,
-          method: opResult.method,
-          path: opResult.path,
-          snippets: opResult.snippets
-            .filter((s) => !s.error)
-            .map((s) => ({
-              language: s.language,
-              client: s.client,
-              highlightMode: s.highlightMode,
-            })),
-        },
-        null,
-        2
-      )
-    );
-
-    // Write individual snippet files
-    for (const snippet of opResult.snippets) {
-      if (snippet.error || !snippet.code) continue;
-
-      const ext = getFileExtension(snippet.language, snippet.client);
-      const filename = snippet.client
-        ? `${snippet.language}-${snippet.client}.${ext}`
-        : `${snippet.language}.${ext}`;
-
-      await writeFile(join(opDir, filename), snippet.code);
-    }
-  }
-
-  console.log(`\nSnippet files written to: ${snippetsDir}`);
-}
-
-/**
- * Get file extension for language
- */
-function getFileExtension(language: string, client?: string): string {
-  return LANGUAGE_METADATA[language]?.extension || 
-         (client ? LANGUAGE_METADATA[client]?.extension : undefined) || 
-         'txt';
-}
-
-/**
- * Ensure directory exists
- */
-async function ensureDirectory(path: string): Promise<void> {
-  try {
-    await access(path, constants.F_OK);
-  } catch {
-    await mkdir(path, { recursive: true });
-  }
-}
-
-/**
- * Chunk array for concurrency control
- */
-function chunkArray<T>(array: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
-  }
-  return chunks;
-}
-
-/**
- * Calculate totals from operation results
- */
-function calculateTotals(operationResults: OperationResult[]): GenerationTotals {
-  return {
-    operationsTotal: operationResults.length,
-    operationsProcessed: operationResults.filter((o) => o.snippets.length > 0).length,
-    snippetsSuccess: operationResults.reduce((sum, o) => sum + o.successCount, 0),
-    snippetsFailed: operationResults.reduce((sum, o) => sum + o.failureCount, 0),
-    snippetsSkipped: operationResults.reduce((sum, o) => sum + o.skipCount, 0),
-  };
-}
-
-/**
- * Create metadata
- */
-function createMetadata(
-  config: GenerationConfig,
-  startTime: number,
-  specInfo?: { title: string; version: string; openapi: string }
-): ManifestMetadata {
-  return {
-    input: config.input,
-    output: config.output,
-    languages: config.languages.map((l) => (l.client ? `${l.language}:${l.client}` : l.language)),
-    generatedAt: new Date().toISOString(),
-    durationMs: Date.now() - startTime,
-    specInfo,
-  };
-}
-
-/**
- * Create minimal manifest for dry run
- */
-function createMinimalManifest(
-  config: GenerationConfig,
-  startTime: number,
-  specInfo: { title: string; version: string; openapi: string } | undefined,
-  operationCount: number
-): GenerationManifest {
-  return {
-    metadata: createMetadata(config, startTime, specInfo),
-    totals: {
-      operationsTotal: operationCount,
-      operationsProcessed: 0,
-      snippetsSuccess: 0,
-      snippetsFailed: 0,
-      snippetsSkipped: 0,
-    },
-    operations: [],
-    unresolvedIssues: [],
-  };
 }
 
 /**
@@ -980,12 +789,12 @@ async function updateSpecWithSnippets(
   }
 
   // Build output path: combined.yaml -> combined_updated.yaml
-  const dir = dirname(absPath);
-  const base = absPath.slice(dir.length + 1);
-  const dotIdx = base.lastIndexOf('.');
-  const stem = dotIdx > 0 ? base.slice(0, dotIdx) : base;
-  const outExt = dotIdx > 0 ? base.slice(dotIdx) : '';
-  const outPath = join(dir, `${stem}_updated${outExt}`);
+  const dotIdx = absPath.lastIndexOf('.');
+  const lastSep = Math.max(absPath.lastIndexOf('/'), absPath.lastIndexOf('\\'));
+  const stem = dotIdx > lastSep ? absPath.slice(lastSep + 1, dotIdx) : absPath.slice(lastSep + 1);
+  const outExt = dotIdx > lastSep ? absPath.slice(dotIdx) : '';
+  const dir = lastSep >= 0 ? absPath.slice(0, lastSep + 1) : '';
+  const outPath = `${dir}${stem}_updated${outExt}`;
 
   await writeFile(outPath, output);
   console.log(
@@ -1002,5 +811,5 @@ function resolvePath(inputPath: string): string {
 }
 
 // Export for programmatic use
-export { GenerationConfig, GenerationManifest } from './types.js';
+export { GenerationConfig } from './types.js';
 export { ErrorCode } from './types.js';

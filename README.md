@@ -1,6 +1,6 @@
 # OpenAPI Snippets Generator
 
-CLI tool that generates HTTP code snippets from OpenAPI specifications and injects them into the spec as `x-codeSamples` for documentation renderers like Redoc and Swagger UI.
+CLI tool that takes an OpenAPI spec and injects `x-codeSamples` per endpoint for documentation renderers like Redoc and Swagger UI.
 
 ## Installation
 
@@ -15,7 +15,7 @@ npm install -g .
 Then run directly:
 
 ```bash
-openapi-snippets -i spec.yaml -l 'shell:curl,node:axios,python:requests' --update-spec
+openapi-snippets -i spec.yaml -l 'shell:curl,node:axios,python:requests'
 ```
 
 ### Local (project-level)
@@ -23,19 +23,19 @@ openapi-snippets -i spec.yaml -l 'shell:curl,node:axios,python:requests' --updat
 ```bash
 npm install
 npm run build
-node dist/cli.js -i combined.yaml -l 'shell:curl,node:axios,python:requests' --update-spec
-redocly build-docs combined_updated.yaml  --output combined.html
+node dist/cli.js -i combined_output.yaml -l 'shell:curl,node:axios,python:requests'
+redocly build-docs combined_output_updated.yaml --output combined_output.html
 ```
 
 ## Quick Start
 
 ```bash
-# Inject x-codeSamples into a copy of the spec (combined_updated.yaml)
-openapi-snippets -i combined.yaml -l 'shell:curl,node:axios,python:requests' --update-spec
+# Inject x-codeSamples into a copy of the spec (combined_output_updated.yaml)
+openapi-snippets -i combined_output.yaml -l 'shell:curl,node:axios,python:requests'
 
 # Target specific operations
-openapi-snippets -i combined.yaml -l 'shell:curl,node:axios' \
-  --operation-ids 'query_users,create_user' --update-spec
+openapi-snippets -i combined_output.yaml -l 'shell:curl,node:axios' \
+  --operation-ids 'query_users,create_user'
 ```
 
 ## What It Does
@@ -53,9 +53,6 @@ Required:
   -l, --languages <list>      Comma-separated language:client pairs
 
 Options:
-  -o, --output <path>         Output directory for manifest/snippets (default: ./generated-snippets)
-  --update-spec               Write <input>_updated.<ext> with x-codeSamples injected
-  --generate-snippets         Also write individual snippet files to the output directory
   --operation-ids <ids>       Comma-separated operation IDs to include
   --include-tags <tags>       Comma-separated tags to include
   --exclude-tags <tags>       Comma-separated tags to exclude
@@ -64,26 +61,23 @@ Options:
   --auth-file <path>          JSON file with auth config
   --server-index <index>      Server index from spec (default: 0)
   --server-vars <vars>        Server variable overrides (key=value,key2=value2)
-  -c, --concurrency <n>       Max concurrent operations (default: 10)
   --include-optional          Include optional parameters in snippets
-  --dry-run                   List operations without generating snippets
-  -v, --verbose               Verbose output
 ```
 
 ## Supported Languages
 
-| Language | Clients |
-|----------|---------|
-| `shell` | `curl` |
-| `node` | `axios`, `native`, `unirest`, `request` |
-| `python` | `requests`, `python3` |
-| `java` | `okhttp`, `unirest`, `httpcomponents` |
-| `go` | `native` |
-| `csharp` | `httpclient`, `restsharp` |
-| `ruby` | `native`, `net-http` |
-| `php` | `curl`, `guzzle` |
-| `swift` | `nsurlsession`, `urlsession` |
-| `kotlin` | `okhttp` |
+| Language | Clients                                 |
+| -------- | --------------------------------------- |
+| `shell`  | `curl`                                  |
+| `node`   | `axios`, `native`, `unirest`, `request` |
+| `python` | `requests`, `python3`                   |
+| `java`   | `okhttp`, `unirest`, `httpcomponents`   |
+| `go`     | `native`                                |
+| `csharp` | `httpclient`, `restsharp`               |
+| `ruby`   | `native`, `net-http`                    |
+| `php`    | `curl`, `guzzle`                        |
+| `swift`  | `nsurlsession`, `urlsession`            |
+| `kotlin` | `okhttp`                                |
 
 ## Usage Examples
 
@@ -91,42 +85,24 @@ Options:
 
 ```bash
 # All operations, 5 languages
-openapi-snippets -i combined.yaml \
-  -l 'shell:curl,node:axios,python:requests,go,java:okhttp' \
-  --update-spec
-# Outputs: combined_updated.yaml
+openapi-snippets -i combined_output.yaml \
+  -l 'shell:curl,node:axios,python:requests,go,java:okhttp'
+# Outputs: combined_output_updated.yaml
 ```
 
 ### Filter by tags or methods
 
 ```bash
-openapi-snippets -i combined.yaml \
+openapi-snippets -i combined_output.yaml \
   -l 'shell:curl,node:axios' \
   --include-tags 'querytimescale_fixed_search' \
-  --methods GET,POST \
-  --update-spec
-```
-
-### Also generate snippet files
-
-```bash
-openapi-snippets -i combined.yaml \
-  -l 'shell:curl,node:axios' \
-  --update-spec \
-  --generate-snippets \
-  -o ./output
-# Produces: ./output/snippets/<operationId>/<lang>-<client>.<ext>
-```
-
-### Dry run (list operations)
-
-```bash
-openapi-snippets -i combined.yaml -l 'shell' --dry-run
+  --methods GET,POST
 ```
 
 ### Authentication
 
 Create `auth.json`:
+
 ```json
 {
   "bearerToken": "your-token-here"
@@ -134,28 +110,12 @@ Create `auth.json`:
 ```
 
 ```bash
-openapi-snippets -i openapi.yaml -l 'shell:curl' --auth-file auth.json --update-spec
+openapi-snippets -i openapi.yaml -l 'shell:curl' --auth-file auth.json
 ```
 
 ## Output
 
-### Default (`--update-spec` only)
-
 Writes `<input>_updated.<ext>` in the same directory as the input file. The original file is never modified.
-
-### With `--generate-snippets`
-
-```
-<output>/
-├── manifest.json
-└── snippets/
-    ├── operation-id-1/
-    │   ├── index.json
-    │   ├── shell-curl.sh
-    │   ├── node-axios.js
-    │   └── python-requests.py
-    └── ...
-```
 
 ### x-codeSamples format
 
@@ -181,38 +141,28 @@ paths:
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| 0 | All snippets generated successfully |
-| 1 | Hard failure (parse error, invalid spec) |
-| 2 | Partial success (some operations failed) |
+| Code | Meaning                                  |
+| ---- | ---------------------------------------- |
+| 0    | All snippets generated successfully      |
+| 1    | Failure (parse error, invalid spec, etc) |
 
 ## Programmatic Usage
 
 ```typescript
 import { generate } from './dist/index.js';
 
-const manifest = await generate({
+await generate({
   input: './openapi.yaml',
-  output: './snippets',
   languages: [
     { language: 'shell', client: 'curl' },
-    { language: 'node', client: 'axios' }
+    { language: 'node', client: 'axios' },
   ],
   filters: { includeTags: ['public'] },
   auth: {},
   server: { index: 0, variables: {} },
-  options: {
-    concurrency: 10,
-    strict: false,
-    failOnPartial: true,
-    includeOptional: false,
-    dryRun: false,
-    outputFormat: 'json',
-    generateFiles: false,
-    updateSpec: true,
-  }
+  includeOptional: false,
 });
+// Writes ./openapi_updated.yaml with x-codeSamples
 ```
 
 ## Technical Details
