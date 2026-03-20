@@ -2,7 +2,97 @@
  * Core types and interfaces for OpenAPI snippet generation
  */
 
+// ============================================================================
+// OpenAPI 3.x Specification Types
+// ============================================================================
+
+export interface OpenAPISpec {
+  info?: {
+    title?: string;
+    version?: string;
+    description?: string;
+  };
+  openapi?: string;
+  paths?: Record<string, PathItem>;
+  servers?: Server[];
+  security?: SecurityRequirement[];
+}
+
+export interface PathItem {
+  summary?: string;
+  description?: string;
+  parameters?: Parameter[];
+  get?: Operation;
+  post?: Operation;
+  put?: Operation;
+  delete?: Operation;
+  options?: Operation;
+  head?: Operation;
+  patch?: Operation;
+  trace?: Operation;
+}
+
+export interface Operation {
+  operationId?: string;
+  summary?: string;
+  description?: string;
+  tags?: string[];
+  security?: SecurityRequirement[];
+  requestBody?: RequestBody;
+  parameters?: Parameter[];
+  deprecated?: boolean;
+  responses?: Record<string, Response>;
+  // Allow extension properties (e.g., x-codeSamples)
+  [key: string]: unknown;
+}
+
+export interface Parameter {
+  name: string;
+  in: 'path' | 'query' | 'header' | 'cookie';
+  required?: boolean;
+  schema?: unknown;
+  description?: string;
+  example?: unknown;
+}
+
+export interface Server {
+  url: string;
+  description?: string;
+  variables?: Record<string, ServerVariable>;
+}
+
+export interface ServerVariable {
+  default?: string;
+  enum?: string[];
+  description?: string;
+}
+
+export interface SecurityRequirement {
+  [scheme: string]: string[];
+}
+
+export interface RequestBody {
+  description?: string;
+  required?: boolean;
+  content?: Record<string, MediaType>;
+}
+
+export interface MediaType {
+  schema?: unknown;
+  example?: unknown;
+  examples?: Record<string, { value?: unknown }>;
+}
+
+export interface Response {
+  description?: string;
+  content?: Record<string, MediaType>;
+}
+
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
+
+// ============================================================================
 // Error codes for classification
+// ============================================================================
 export enum ErrorCode {
   E_PARSE_INVALID_SPEC = 'E_PARSE_INVALID_SPEC',
   E_UNSUPPORTED_LANGUAGE = 'E_UNSUPPORTED_LANGUAGE',
@@ -68,7 +158,7 @@ export interface OperationFilters {
   operationIds?: string[];
   includeTags?: string[];
   excludeTags?: string[];
-  pathRegex?: RegExp | undefined;
+  pathRegex?: string;
   methods?: string[];
 }
 
@@ -96,6 +186,7 @@ export interface GenerationOptions {
   outputFormat: 'json' | 'markdown';
   generateFiles: boolean;
   updateSpec: boolean;
+  onProgress?: (current: number, total: number, message: string) => void;
 }
 
 // Result of snippet generation for one operation+language

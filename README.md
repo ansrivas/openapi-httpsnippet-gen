@@ -24,6 +24,7 @@ openapi-snippets -i spec.yaml -l 'shell:curl,node:axios,python:requests' --updat
 npm install
 npm run build
 node dist/cli.js -i combined.yaml -l 'shell:curl,node:axios,python:requests' --update-spec
+redocly build-docs combined_updated.yaml  --output combined.html
 ```
 
 ## Quick Start
