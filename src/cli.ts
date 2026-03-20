@@ -34,6 +34,8 @@ interface CLIOptions {
   failOnPartial?: boolean;
   includeOptional?: boolean;
   dryRun?: boolean;
+  updateSpec?: boolean;
+  generateSnippets?: boolean;
   verbose?: boolean;
 }
 
@@ -126,7 +128,8 @@ function parseGenerationOptions(options: CLIOptions): GenerationOptions {
     includeOptional: options.includeOptional ?? false,
     dryRun: options.dryRun ?? false,
     outputFormat: (options.format as 'json' | 'markdown') ?? 'json',
-    generateFiles: true
+    generateFiles: options.generateSnippets ?? false,
+    updateSpec: options.updateSpec ?? false,
   };
 }
 
@@ -154,6 +157,8 @@ async function main() {
     .option('--fail-on-partial', 'Fail on partial success (some operations failed)')
     .option('--include-optional', 'Include optional parameters')
     .option('--dry-run', 'Parse and list operations without generating snippets')
+    .option('--update-spec', 'Update the input OpenAPI spec file with x-codeSamples')
+    .option('--generate-snippets', 'Write individual snippet files to the output directory')
     .option('-v, --verbose', 'Verbose output');
   
   program.parse();
@@ -172,7 +177,7 @@ async function main() {
   };
   
   // Validate languages
-  const validLanguages = ['shell', 'node', 'python', 'java', 'csharp', 'go', 'ruby', 'php', 'swift', 'kotlin', 'csharp', 'c'];
+  const validLanguages = ['shell', 'node', 'python', 'java', 'csharp', 'go', 'ruby', 'php', 'swift', 'kotlin', 'c', 'curl'];
   const validClients: Record<string, string[]> = {
     node: ['axios', 'native', 'unirest', 'request'],
     python: ['requests', 'python3', 'fetch'],
@@ -182,7 +187,7 @@ async function main() {
     ruby: ['native', 'net-http'],
     php: ['curl', 'guzzle', 'pecl-http'],
     swift: ['nsurlsession', 'urlsession'],
-    kotlin: ['okhttp', ' Fuel'],
+    kotlin: ['okhttp', 'fuel'],
     shell: ['curl', 'wget']
   };
   

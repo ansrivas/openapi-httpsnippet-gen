@@ -7,29 +7,41 @@
   "bin": {
     "openapi-snippets": "dist/cli.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
+    "prepublishOnly": "tsc",
     "start": "node dist/cli.js",
     "dev": "tsc && node dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "keywords": ["openapi", "snippets", "httpsnippet", "code-generation"],
+  "keywords": [
+    "openapi",
+    "snippets",
+    "httpsnippet",
+    "code-generation"
+  ],
   "license": "MIT",
   "dependencies": {
+    "@readme/httpsnippet": "^11.1.0",
     "@readme/oas-to-har": "^30.0.3",
     "@readme/oas-to-snippet": "^29.3.8",
     "commander": "^12.0.0",
     "fs-extra": "^11.2.0",
-    "httpsnippet": "^3.0.9",
+    "js-yaml": "^4.1.1",
     "oas": "^31.1.2",
     "oas-normalize": "^16.0.2"
   },
   "devDependencies": {
     "@types/fs-extra": "^11.0.4",
-    "@types/node": "^20.11.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
     "typescript": "^5.3.3",
-    "vitest": "^1.2.0"
+    "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=18.0.0"

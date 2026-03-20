@@ -6,9 +6,10 @@ import OASNormalize from 'oas-normalize';
 import OAS from 'oas';
 import oasToHar from '@readme/oas-to-har';
 import oasToSnippet from '@readme/oas-to-snippet';
-import { HTTPSnippet } from 'httpsnippet';
-import { mkdir, writeFile, access, constants } from 'fs/promises';
-import { dirname, join } from 'path';
+import { HTTPSnippet } from '@readme/httpsnippet';
+import { mkdir, readFile, writeFile, access, constants } from 'fs/promises';
+import { dirname, join, extname } from 'path';
+import yaml from 'js-yaml';
 import {
   GenerationConfig,
   GenerationManifest,
@@ -27,12 +28,7 @@ import {
 interface OASInstance {
   getDefinition: () => any;
   operation: (path: string, method: string) => any;
-  findOperation: (operationId: string) => any;
 }
-
-// Cache for OAS instance
-let cachedOAS: OASInstance | null = null;
-let cachedSpec: any = null;
 
 /**
  * Main generation function
@@ -48,11 +44,8 @@ export async function generate(config: GenerationConfig): Promise<GenerationMani
     
     const normalizer = new OASNormalize(config.input, { enablePaths: true });
     const spec = await normalizer.dereference();
-    cachedSpec = spec;
-    
     // Create OAS instance for library compatibility
     const oasInstance = new OAS(spec as any) as any;
-    cachedOAS = oasInstance;
     
     // Extract spec metadata
     const specInfo = {
@@ -106,6 +99,11 @@ export async function generate(config: GenerationConfig): Promise<GenerationMani
     // Generate output files if requested
     if (config.options.generateFiles) {
       await generateOutputFiles(operationResults, config);
+    }
+
+    // Update the OpenAPI spec with x-codeSamples if requested
+    if (config.options.updateSpec) {
+      await updateSpecWithSnippets(config.input, operationResults);
     }
     
     return manifest;
@@ -310,7 +308,7 @@ function buildRequestValues(op: OperationDescriptor, config: GenerationConfig): 
     values.header['Authorization'] = `Bearer ${config.auth.bearerToken}`;
   } else if (config.auth.apiKey) {
     values.header = values.header || {};
-    values.header['X-API-Key'] = '<API_KEY>';
+    values.header['X-API-Key'] = config.auth.apiKey;
   } else if (config.auth.basicAuth) {
     values.header = values.header || {};
     values.header['Authorization'] = `Basic ${Buffer.from(`${config.auth.basicAuth.username}:${config.auth.basicAuth.password}`).toString('base64')}`;
@@ -446,9 +444,9 @@ async function generateSnippet(
     // Get OAS Operation object from path and method
     const oasOperation = oas.operation(op.path, op.method.toLowerCase());
     
-    // Build the language target (e.g., "node:axios" or just "shell")
+    // Build the language target (oasToSnippet expects [language, client] or just language)
     const langTarget = langConfig.client 
-      ? `${langConfig.language}:${langConfig.client}`
+      ? [langConfig.language, langConfig.client]
       : langConfig.language;
     
     const snippetResult = await oasToSnippet(
@@ -495,7 +493,8 @@ async function generateSnippet(
         postData: harRequest.postData
       } as any);
       
-      const code = snippet.convert(langConfig.language as any, langConfig.client as any) as string || '';
+      const converted = snippet.convert(langConfig.language as any, langConfig.client as any);
+      const code = converted.filter((c): c is string => c !== false).join('\n') || '';
       
       if (code) {
         return {
@@ -627,7 +626,7 @@ console.log(data);`;
         return `import requests
 
 response = requests.${method.toLowerCase()}(
-    '${method}', '${path}',
+    '${path}',
     headers={'Authorization': 'Bearer <TOKEN>'}
 )
 
@@ -637,7 +636,7 @@ print(response.json())`;
 import json
 
 req = urllib.request.Request(
-    '${method}', '${path}',
+    '${path}',
     headers={'Authorization': 'Bearer <TOKEN>'}
 )
 
@@ -798,6 +797,137 @@ function createMinimalManifest(
     operations: [],
     unresolvedIssues: []
   };
+}
+
+/**
+ * Update the OpenAPI spec with generated x-codeSamples (writes to a _updated copy)
+ */
+async function updateSpecWithSnippets(
+  inputPath: string,
+  operationResults: OperationResult[]
+): Promise<void> {
+  // Resolve the file path (handle URLs by skipping)
+  if (inputPath.startsWith('http://') || inputPath.startsWith('https://')) {
+    console.warn('Cannot update remote spec — skipping x-codeSamples injection');
+    return;
+  }
+
+  const absPath = resolvePath(inputPath);
+  const raw = await readFile(absPath, 'utf-8');
+  const ext = extname(absPath).toLowerCase();
+
+  // Parse: YAML or JSON
+  let spec: Record<string, any>;
+  if (ext === '.yaml' || ext === '.yml') {
+    spec = yaml.load(raw) as Record<string, any>;
+  } else if (ext === '.json') {
+    spec = JSON.parse(raw);
+  } else {
+    console.warn(`Unknown spec format '${ext}' — skipping x-codeSamples injection`);
+    return;
+  }
+
+  if (!spec.paths || typeof spec.paths !== 'object') {
+    console.warn('No paths found in spec — skipping x-codeSamples injection');
+    return;
+  }
+
+  // Build a lookup map: "METHOD /path" -> OperationResult
+  const resultMap = new Map<string, OperationResult>();
+  for (const result of operationResults) {
+    resultMap.set(`${result.method.toUpperCase()} ${result.path}`, result);
+  }
+
+  // Helper: map snippet language to display label
+  function languageLabel(lang: string, client?: string): string {
+    const labels: Record<string, string> = {
+      shell: 'Shell',
+      node: 'Node.js',
+      python: 'Python',
+      java: 'Java',
+      csharp: 'C#',
+      go: 'Go',
+      ruby: 'Ruby',
+      php: 'PHP',
+      swift: 'Swift',
+      kotlin: 'Kotlin',
+      c: 'C',
+      curl: 'cURL',
+    };
+    if (client) {
+      return `${labels[lang] || lang} (${client})`;
+    }
+    return labels[lang] || lang;
+  }
+
+  const httpMethods = ['get', 'post', 'put', 'delete', 'patch', 'head', 'options'];
+  let totalSamples = 0;
+
+  for (const [path, pathItem] of Object.entries(spec.paths)) {
+    if (!pathItem || typeof pathItem !== 'object') continue;
+
+    for (const method of httpMethods) {
+      const operation = (pathItem as Record<string, any>)[method];
+      if (!operation || typeof operation !== 'object') continue;
+
+      const key = `${method.toUpperCase()} ${path}`;
+      const result = resultMap.get(key);
+      if (!result) continue;
+
+      // Build x-codeSamples from successful snippets
+      const codeSamples: Array<{ lang: string; label: string; source: string }> = [];
+
+      for (const snippet of result.snippets) {
+        if (snippet.error || !snippet.code) continue;
+
+        codeSamples.push({
+          lang: languageLabel(snippet.language, snippet.client),
+          label: snippet.client
+            ? `${snippet.language}-${snippet.client}`
+            : snippet.language,
+          source: snippet.code,
+        });
+      }
+
+      if (codeSamples.length > 0) {
+        operation['x-codeSamples'] = codeSamples;
+        totalSamples += codeSamples.length;
+      }
+    }
+  }
+
+  // Serialize back to the original format
+  let output: string;
+  if (ext === '.yaml' || ext === '.yml') {
+    output = yaml.dump(spec, {
+      lineWidth: -1,
+      noRefs: true,
+      sortKeys: false,
+      quotingType: '"',
+      forceQuotes: false,
+    });
+  } else {
+    output = JSON.stringify(spec, null, 2) + '\n';
+  }
+
+  // Build output path: combined.yaml -> combined_updated.yaml
+  const dir = dirname(absPath);
+  const base = absPath.slice(dir.length + 1);
+  const dotIdx = base.lastIndexOf('.');
+  const stem = dotIdx > 0 ? base.slice(0, dotIdx) : base;
+  const outExt = dotIdx > 0 ? base.slice(dotIdx) : '';
+  const outPath = join(dir, `${stem}_updated${outExt}`);
+
+  await writeFile(outPath, output);
+  console.log(`\nWrote ${outPath} with ${totalSamples} x-codeSamples across ${operationResults.length} operations`);
+}
+
+/**
+ * Resolve a possibly-relative path to an absolute path
+ */
+function resolvePath(inputPath: string): string {
+  if (inputPath.startsWith('/')) return inputPath;
+  return new URL(inputPath, `file://${process.cwd()}/`).pathname;
 }
 
 // Export for programmatic use

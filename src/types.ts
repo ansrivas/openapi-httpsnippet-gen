@@ -12,14 +12,6 @@ export enum ErrorCode {
   E_OUTPUT_WRITE_FAILED = 'E_OUTPUT_WRITE_FAILED',
 }
 
-// Operation identity for stable key generation
-export interface OperationKey {
-  operationId: string;
-  method: string;
-  path: string;
-  normalizedPath: string;
-}
-
 // Descriptor for an operation extracted from OpenAPI spec
 export interface OperationDescriptor {
   operationId: string;
@@ -103,6 +95,7 @@ export interface GenerationOptions {
   dryRun: boolean;
   outputFormat: 'json' | 'markdown';
   generateFiles: boolean;
+  updateSpec: boolean;
 }
 
 // Result of snippet generation for one operation+language
