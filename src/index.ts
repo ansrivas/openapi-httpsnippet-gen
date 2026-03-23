@@ -8,7 +8,7 @@ import oasToHar from '@readme/oas-to-har';
 import oasToSnippet from '@readme/oas-to-snippet';
 import { HTTPSnippet } from '@readme/httpsnippet';
 import { readFile, writeFile } from 'fs/promises';
-import { extname } from 'path';
+import { extname, isAbsolute, resolve as resolveFsPath } from 'path';
 import yaml from 'js-yaml';
 import {
   GenerationConfig,
@@ -61,6 +61,7 @@ const LANGUAGE_METADATA: Readonly<Record<string, LanguageMeta>> = Object.freeze(
  */
 export async function generate(config: GenerationConfig): Promise<void> {
   const startTime = Date.now();
+  const concurrency = Math.max(1, config.concurrency ?? 8);
 
   try {
     console.log(`Parsing OpenAPI spec: ${config.input}`);
@@ -80,11 +81,13 @@ export async function generate(config: GenerationConfig): Promise<void> {
 
     const operations = discoverOperations(spec, config.filters);
     console.log(`Found ${operations.length} operations`);
+    console.log(`Concurrency: ${concurrency}`);
 
-    // Process all operations
+    // Process operations with bounded concurrency
     const operationResults: OperationResult[] = [];
-    const promises = operations.map((op) => processOperation(op, config, oasInstance, spec));
-    const settled = await Promise.allSettled(promises);
+    const settled = await mapWithConcurrency(operations, concurrency, (op) =>
+      processOperation(op, config, oasInstance, spec)
+    );
 
     for (const result of settled) {
       if (result.status === 'fulfilled') {
@@ -115,8 +118,42 @@ export async function generate(config: GenerationConfig): Promise<void> {
     console.log(`Duration: ${duration}ms`);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    throw new Error(`Generation failed: ${errorMessage}`);
+    throw new Error(`Generation failed: ${errorMessage}`, { cause: error });
   }
+}
+
+/**
+ * Process a list with a configurable concurrency limit while preserving order.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  if (items.length === 0) return [];
+
+  const maxWorkers = Math.min(Math.max(1, concurrency), items.length);
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+
+      if (index >= items.length) return;
+
+      try {
+        const value = await mapper(items[index], index);
+        results[index] = { status: 'fulfilled', value };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: maxWorkers }, () => worker()));
+  return results;
 }
 
 /**
@@ -125,6 +162,7 @@ export async function generate(config: GenerationConfig): Promise<void> {
 function discoverOperations(spec: OpenAPISpec, filters: OperationFilters): OperationDescriptor[] {
   const operations: OperationDescriptor[] = [];
   const paths = spec.paths || {};
+  const pathRegex = filters.pathRegex ? new RegExp(filters.pathRegex) : undefined;
 
   const httpMethods = ['get', 'post', 'put', 'delete', 'patch', 'head', 'options'];
 
@@ -152,12 +190,12 @@ function discoverOperations(spec: OpenAPISpec, filters: OperationFilters): Opera
         if (opTags.some((t: string) => filters.excludeTags!.includes(t))) continue;
       }
 
-      if (filters.pathRegex && !new RegExp(filters.pathRegex).test(path)) continue;
+      if (pathRegex && !pathRegex.test(path)) continue;
 
       if (filters.methods && !filters.methods.includes(method.toUpperCase())) continue;
 
       // Extract parameters
-      const parameters = extractParameters(operation, pathItem as any);
+      const parameters = extractParameters(operation, pathItem as PathItem);
 
       // Extract request body
       const requestBodyInfo = extractRequestBody(operation);
@@ -198,29 +236,43 @@ function generateFallbackOperationId(method: string, path: string): string {
  * Extract parameters from operation
  */
 function extractParameters(operation: Operation, pathItem: PathItem): ParameterInfo[] {
-  const params: ParameterInfo[] = [];
-
-  // Path-level parameters
-  const pathParams = (pathItem.parameters || []).filter((p) => p.in === 'path');
-
-  // Operation-level parameters
-  const opParams = operation.parameters || [];
-
-  const allParams = [...pathParams, ...opParams];
+  const mergedParams = new Map<string, ParameterInfo>();
+  const pathLevelParams = pathItem.parameters || [];
+  const operationLevelParams = operation.parameters || [];
+  const allParams = [...pathLevelParams, ...operationLevelParams];
 
   for (const param of allParams) {
-    params.push({
+    const schema = param.schema as Record<string, unknown> | undefined;
+    const key = `${param.in}:${param.name}`;
+
+    // Operation-level parameters naturally override path-level ones by insertion order.
+    mergedParams.set(key, {
       name: param.name,
       in: param.in,
       required: param.required || false,
       schema: param.schema || param,
-      example: param.example ?? (param.schema as Record<string, unknown>)?.example,
-      default: (param.schema as Record<string, unknown>)?.default ?? param.description,
+      example: param.example ?? schema?.example,
+      default: schema?.default,
       description: param.description,
     });
   }
 
-  return params;
+  return Array.from(mergedParams.values());
+}
+
+/**
+ * Resolve parameter value with nullish checks to preserve falsy examples/defaults.
+ */
+function resolveParameterValue(param: ParameterInfo): unknown {
+  const schema = param.schema as Record<string, unknown> | undefined;
+  return param.example ?? param.default ?? generatePrimitiveExample(schema ?? {});
+}
+
+/**
+ * Return a parameter key exactly as used in the `values` object.
+ */
+function getParameterKey(name: string): string {
+  return name.replace(/[{}]/g, '');
 }
 
 /**
@@ -259,13 +311,11 @@ async function processOperation(
   // Build request values for HAR generation
   const values = buildRequestValues(op, config);
 
-  // Process each requested language in parallel
-  const snippetResults = await Promise.all(
-    config.languages.map((langConfig) =>
-      generateSnippet(operationKey, op, langConfig, oas, spec, values, config)
-    )
-  );
-  snippets.push(...snippetResults);
+  // Process snippets sequentially per operation to keep global concurrency bounded.
+  for (const langConfig of config.languages) {
+    const snippet = await generateSnippet(operationKey, op, langConfig, oas, spec, values, config);
+    snippets.push(snippet);
+  }
 
   const successCount = snippets.filter((s) => !s.error && s.code).length;
   const failureCount = snippets.filter((s) => s.error).length;
@@ -286,7 +336,7 @@ async function processOperation(
  * Create operation key string
  */
 function createOperationKey(op: OperationDescriptor): string {
-  return op.operationId || `${op.method.toLowerCase()}_${op.path.replace(/[\/{}]/g, '_')}`;
+  return op.operationId || `${op.method.toLowerCase()}_${op.path.replace(/[/{}]/g, '_')}`;
 }
 
 /**
@@ -315,19 +365,17 @@ function buildRequestValues(op: OperationDescriptor, config: GenerationConfig): 
 
   // Process parameters
   for (const param of op.parameters) {
-    const paramName = param.name.replace(/[{}]/g, '');
-    const schema = param.schema as Record<string, any> | undefined;
-    const value =
-      param.example || param.default || generatePrimitiveExample(schema as Record<string, unknown>);
+    const paramKey = getParameterKey(param.name);
+    const value = resolveParameterValue(param);
 
     if (param.in === 'path') {
-      values.path[paramName] = value;
+      values.path[paramKey] = value;
     } else if (param.in === 'query') {
-      values.query[paramName] = value;
+      values.query[paramKey] = value;
     } else if (param.in === 'header') {
-      values.header[paramName] = value;
+      values.header[paramKey] = value;
     } else if (param.in === 'cookie') {
-      values.cookie[paramName] = value;
+      values.cookie[paramKey] = value;
     }
   }
 
@@ -335,10 +383,13 @@ function buildRequestValues(op: OperationDescriptor, config: GenerationConfig): 
   if (!config.includeOptional) {
     for (const param of op.parameters) {
       if (!param.required) {
+        const paramKey = getParameterKey(param.name);
         if (param.in === 'query') {
-          delete values.query[param.name];
+          delete values.query[paramKey];
         } else if (param.in === 'header') {
-          delete values.header[param.name];
+          delete values.header[paramKey];
+        } else if (param.in === 'cookie') {
+          delete values.cookie[paramKey];
         }
       }
     }
@@ -346,7 +397,7 @@ function buildRequestValues(op: OperationDescriptor, config: GenerationConfig): 
 
   // Add request body if present
   if (op.requestBodyInfo) {
-    values.body = op.requestBodyInfo.example || extractExampleFromSchema(op.requestBodyInfo.schema);
+    values.body = op.requestBodyInfo.example ?? extractExampleFromSchema(op.requestBodyInfo.schema);
   }
 
   // Set server configuration
@@ -389,7 +440,7 @@ function extractExampleFromSchema(schema: unknown): unknown {
 /**
  * Generate example value for primitive types
  */
-function generatePrimitiveExample(schema: Record<string, unknown>): string {
+function generatePrimitiveExample(schema: Record<string, unknown>): unknown {
   const { type, format } = schema;
   const enumValues = schema.enum as unknown[] | undefined;
 
@@ -412,14 +463,14 @@ function generatePrimitiveExample(schema: Record<string, unknown>): string {
       }
     case 'integer':
     case 'number':
-      if (typeof schema.minimum === 'number') return String(schema.minimum);
-      return '0';
+      if (typeof schema.minimum === 'number') return schema.minimum;
+      return 0;
     case 'boolean':
-      return 'true';
+      return true;
     case 'array':
-      return '[]';
+      return [];
     case 'object':
-      return '{}';
+      return {};
     default:
       return '<example>';
   }
@@ -542,19 +593,7 @@ async function generateSnippet(
     );
   }
 
-  // Generate a basic placeholder snippet
-  const placeholderCode = generatePlaceholderSnippet(op, langConfig);
-  warnings.push('Generated placeholder snippet - operation may have invalid parameters');
-
-  return {
-    operationKey,
-    language: langConfig.language,
-    client: langConfig.client,
-    code: placeholderCode,
-    highlightMode: langConfig.language,
-    warnings,
-    error: undefined,
-  };
+  return createSnippetGenerationError(operationKey, langConfig, warnings);
 }
 
 /**
@@ -580,6 +619,34 @@ function createUnsupportedLanguageError(
 }
 
 /**
+ * Create error when snippet generation fails across all generation paths.
+ */
+function createSnippetGenerationError(
+  operationKey: string,
+  langConfig: { language: string; client: string | undefined },
+  warnings: string[]
+): SnippetResult {
+  const remediationDetail =
+    warnings.length > 0
+      ? `Generation attempts failed: ${warnings.join(' | ')}`
+      : 'No code snippet could be generated for this operation/language pair.';
+
+  return {
+    operationKey,
+    language: langConfig.language,
+    client: langConfig.client,
+    code: '',
+    highlightMode: undefined,
+    warnings,
+    error: {
+      code: ErrorCode.E_SNIPPET_GENERATION_FAILED,
+      message: `Failed to generate snippet for language '${langConfig.language}'`,
+      remediation: remediationDetail,
+    },
+  };
+}
+
+/**
  * Build URL from spec
  */
 function buildUrlFromSpec(
@@ -598,7 +665,8 @@ function buildUrlFromSpec(
     // Replace server variables
     if (server.variables) {
       for (const [key, varDef] of Object.entries(server.variables)) {
-        const value = config.server.variables[key] || (varDef as any).default || '';
+        const variable = varDef as { default?: string };
+        const value = config.server.variables[key] ?? variable.default ?? '';
         baseUrl = baseUrl.replace(`{${key}}`, value);
       }
     }
@@ -608,87 +676,12 @@ function buildUrlFromSpec(
   let path = op.path;
   for (const param of op.parameters) {
     if (param.in === 'path') {
-      const schema = param.schema as Record<string, any> | undefined;
-      const value = String(
-        param.example ||
-          param.default ||
-          generatePrimitiveExample(schema as Record<string, unknown>)
-      );
+      const value = String(resolveParameterValue(param));
       path = path.replace(`{${param.name}}`, encodeURIComponent(value));
     }
   }
 
   return `${baseUrl}${path}`;
-}
-
-/**
- * Generate placeholder snippet
- */
-function generatePlaceholderSnippet(
-  op: OperationDescriptor,
-  langConfig: { language: string; client: string | undefined }
-): string {
-  const method = op.method;
-  const path = op.path;
-
-  switch (langConfig.language) {
-    case 'shell':
-    case 'curl':
-      return `curl -X ${method} '${path}' \\
-  -H 'Authorization: Bearer <TOKEN>' \\
-  -H 'Content-Type: application/json'`;
-
-    case 'node':
-      if (langConfig.client === 'axios') {
-        return `const axios = require('axios');
-
-const response = await axios.${method.toLowerCase()}('${path}', {
-  headers: {
-    'Authorization': 'Bearer <TOKEN>',
-    'Content-Type': 'application/json'
-  }
-});
-
-console.log(response.data);`;
-      }
-      return `const response = await fetch('${path}', {
-  method: '${method}',
-  headers: {
-    'Authorization': 'Bearer <TOKEN>',
-    'Content-Type': 'application/json'
-  }
-});
-
-const data = await response.json();
-console.log(data);`;
-
-    case 'python':
-      if (langConfig.client === 'requests') {
-        return `import requests
-
-response = requests.${method.toLowerCase()}(
-    '${path}',
-    headers={'Authorization': 'Bearer <TOKEN>'}
-)
-
-print(response.json())`;
-      }
-      return `import urllib.request
-import json
-
-req = urllib.request.Request(
-    '${path}',
-    headers={'Authorization': 'Bearer <TOKEN>'}
-)
-
-with urllib.request.urlopen(req) as response:
-    print(json.loads(response.read()))`;
-
-    default:
-      return `// ${method} ${path}
-// Authorization: Bearer <TOKEN>
-`;
-  }
 }
 
 /**
@@ -806,8 +799,8 @@ async function updateSpecWithSnippets(
  * Resolve a possibly-relative path to an absolute path
  */
 function resolvePath(inputPath: string): string {
-  if (inputPath.startsWith('/')) return inputPath;
-  return new URL(inputPath, `file://${process.cwd()}/`).pathname;
+  if (isAbsolute(inputPath)) return inputPath;
+  return resolveFsPath(process.cwd(), inputPath);
 }
 
 // Export for programmatic use

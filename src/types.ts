@@ -141,6 +141,7 @@ export interface GenerationConfig {
   auth: AuthConfig;
   server: ServerConfig;
   includeOptional: boolean;
+  concurrency?: number;
 }
 
 // Parsed language with optional client

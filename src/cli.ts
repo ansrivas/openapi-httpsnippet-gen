@@ -44,6 +44,7 @@ interface CLIOptions {
   serverIndex?: number;
   serverVars?: string;
   includeOptional?: boolean;
+  concurrency?: number;
 }
 
 function parseLanguageString(langStr: string): LanguageConfig[] {
@@ -75,7 +76,7 @@ function parseFilters(options: CLIOptions): OperationFilters {
     try {
       new RegExp(options.pathRegex);
       filters.pathRegex = options.pathRegex;
-    } catch (e) {
+    } catch {
       console.error(`Invalid regex: ${options.pathRegex}`);
       process.exit(1);
     }
@@ -99,7 +100,7 @@ function parseAuth(options: CLIOptions): AuthConfig {
       if (authData.username && authData.password) {
         auth.basicAuth = { username: authData.username, password: authData.password };
       }
-    } catch (e) {
+    } catch {
       console.error(`Failed to read auth file: ${options.authFile}`);
       process.exit(1);
     }
@@ -125,6 +126,18 @@ function parseServerConfig(options: CLIOptions): ServerConfig {
   }
 
   return config;
+}
+
+function parseConcurrency(options: CLIOptions): number {
+  const defaultConcurrency = 8;
+  const value = options.concurrency ?? defaultConcurrency;
+
+  if (!Number.isInteger(value) || value < 1) {
+    console.error('--concurrency must be a positive integer');
+    process.exit(1);
+  }
+
+  return value;
 }
 
 async function main() {
@@ -154,6 +167,11 @@ async function main() {
     .option('--server-index <index>', 'Server index to use')
     .option('--server-vars <vars>', 'Server variable overrides (key=value,key2=value2)')
     .option('--include-optional', 'Include optional parameters in generated snippets')
+    .option(
+      '--concurrency <number>',
+      'Maximum number of operations to process concurrently (default: 8)',
+      (value) => Number.parseInt(value, 10)
+    )
     .addHelpText(
       'after',
       `
@@ -161,6 +179,7 @@ Examples:
   $ openapi-snippets -i petstore.yaml -l shell,node:axios
   $ openapi-snippets -i spec.yaml -l go,java:okhttp --auth-file ./auth.json
   $ openapi-snippets -i spec.yaml -l node --include-tags users --exclude-tags internal
+  $ openapi-snippets -i spec.yaml -l shell:curl,node:axios --concurrency 6
 `
     );
 
@@ -193,6 +212,7 @@ Examples:
     auth: parseAuth(opts),
     server: parseServerConfig(opts),
     includeOptional: opts.includeOptional ?? false,
+    concurrency: parseConcurrency(opts),
   };
 
   // Validate languages
