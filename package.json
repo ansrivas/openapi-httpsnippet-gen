@@ -1,5 +1,5 @@
 {
-  "name": "openapi-snippets",
+  "name": "@ansrivas/openapi-snippets",
   "version": "1.0.0",
   "description": "OpenAPI to multi-language code snippet generator",
   "type": "module",
@@ -52,5 +52,9 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
